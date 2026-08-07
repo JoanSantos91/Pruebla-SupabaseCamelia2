@@ -9,7 +9,6 @@ import os
 from contextlib import contextmanager
 
 import psycopg
-import pandas as pd
 import streamlit as st
 
 
@@ -140,40 +139,6 @@ def db():
     finally:
         connection.close()
 
-
-def query_df(sql: str, params=None) -> pd.DataFrame:
-    """Ejecuta una consulta SELECT y devuelve un DataFrame real.
-
-    Esta función evita que pandas interprete las filas híbridas del adaptador
-    como nombres de columnas. Se usa para todas las lecturas tabulares de la UI.
-    """
-    converted = _convert_placeholders(sql)
-    with psycopg.connect(
-        database_url(),
-        autocommit=True,
-        connect_timeout=15,
-    ) as raw:
-        with raw.cursor() as cur:
-            cur.execute(converted, params or ())
-            if cur.description is None:
-                return pd.DataFrame()
-            columns = [col.name for col in cur.description]
-            rows = cur.fetchall()
-    return pd.DataFrame(rows, columns=columns)
-
-
-def query_one(sql: str, params=None):
-    """Devuelve una fila híbrida para lecturas puntuales."""
-    converted = _convert_placeholders(sql)
-    with psycopg.connect(
-        database_url(),
-        row_factory=_hybrid_row_factory,
-        autocommit=True,
-        connect_timeout=15,
-    ) as raw:
-        with raw.cursor() as cur:
-            cur.execute(converted, params or ())
-            return cur.fetchone()
 
 def init_db():
     """Crea/valida el esquema mínimo necesario en Supabase."""
