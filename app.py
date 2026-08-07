@@ -206,29 +206,85 @@ def login():
         st.markdown("<div class='login-security'>🔒 Acceso privado. Los datos de ingreso no se muestran dentro de la aplicación.</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
+def _safe_number(value, default=0.0):
+    """Convierte valores numéricos de SQLite/PostgreSQL/Pandas de forma segura."""
+    if value is None:
+        return float(default)
+    try:
+        if pd.isna(value):
+            return float(default)
+    except Exception:
+        pass
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if not value:
+            return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+
+
+def _format_quantity(value):
+    value = _safe_number(value, 0.0)
+    return f"{value:g}"
+
+
 def load_df():
     with db() as conn:
         df = pd.read_sql_query("SELECT * FROM inventory ORDER BY updated_at DESC,id DESC", conn)
         locations = pd.read_sql_query("SELECT inventory_id, area_name, quantity FROM item_locations ORDER BY id", conn)
         destinations = pd.read_sql_query("SELECT inventory_id, destination_name, quantity FROM item_destinations ORDER BY id", conn)
+
+    # PostgreSQL/Psycopg puede entregar tipos distintos a SQLite (Decimal,
+    # strings o nulos). Normalizamos aquí para que toda la UI reciba floats.
+    if not locations.empty:
+        locations["quantity"] = pd.to_numeric(locations["quantity"], errors="coerce").fillna(0.0).astype(float)
+        locations["inventory_id"] = pd.to_numeric(locations["inventory_id"], errors="coerce")
+        locations = locations.dropna(subset=["inventory_id"])
+    if not destinations.empty:
+        destinations["quantity"] = pd.to_numeric(destinations["quantity"], errors="coerce").fillna(0.0).astype(float)
+        destinations["inventory_id"] = pd.to_numeric(destinations["inventory_id"], errors="coerce")
+        destinations = destinations.dropna(subset=["inventory_id"])
     if df.empty:
         return df
+    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0.0).astype(float)
+    if "estimated_unit_value" in df.columns:
+        df["estimated_unit_value"] = pd.to_numeric(df["estimated_unit_value"], errors="coerce").fillna(0.0).astype(float)
+
     loc_map = {}
     for item_id, group in locations.groupby("inventory_id") if not locations.empty else []:
-        loc_map[int(item_id)] = "; ".join(f"{r.area_name}: {r.quantity:g}" for _, r in group.iterrows() if float(r.quantity) > 0)
+        parts = []
+        for _, row in group.iterrows():
+            qty = _safe_number(row.get("quantity"), 0.0)
+            if qty > 0:
+                parts.append(f"{row.get('area_name', '')}: {_format_quantity(qty)}")
+        loc_map[int(item_id)] = "; ".join(parts)
+
     dest_map = {}
     camelia_map = {}
     allocated_map = {}
     for item_id, group in destinations.groupby("inventory_id") if not destinations.empty else []:
-        dest_map[int(item_id)] = "; ".join(f"{r.destination_name}: {r.quantity:g}" for _, r in group.iterrows() if float(r.quantity) > 0)
+        parts = []
+        for _, row in group.iterrows():
+            qty = _safe_number(row.get("quantity"), 0.0)
+            if qty > 0:
+                parts.append(f"{row.get('destination_name', '')}: {_format_quantity(qty)}")
+        dest_map[int(item_id)] = "; ".join(parts)
         c = group[group.destination_name.eq("Camelia · permanece en el local")]
-        camelia_map[int(item_id)] = float(c.quantity.sum()) if not c.empty else 0.0
-        allocated_map[int(item_id)] = float(group.quantity.sum())
+        camelia_map[int(item_id)] = _safe_number(c.quantity.sum(), 0.0) if not c.empty else 0.0
+        allocated_map[int(item_id)] = _safe_number(group.quantity.sum(), 0.0)
+
     df["location_summary"] = df.id.map(loc_map).fillna(df.current_area)
     df["destination_summary"] = df.id.map(dest_map).fillna(df.destination)
-    df["camelia_quantity"] = df.id.map(camelia_map).fillna(0.0)
-    df["allocated_quantity"] = df.id.map(allocated_map).fillna(df.quantity)
-    df["inventory_status"] = df.apply(lambda r: "🟢 Completo" if abs(float(r.quantity)-float(r.allocated_quantity)) < 0.0001 else ("🟡 Pendiente" if float(r.allocated_quantity) < float(r.quantity) else "🔴 Error"), axis=1)
+    df["camelia_quantity"] = pd.to_numeric(df.id.map(camelia_map), errors="coerce").fillna(0.0).astype(float)
+    df["allocated_quantity"] = pd.to_numeric(df.id.map(allocated_map), errors="coerce").fillna(df.quantity).astype(float)
+    df["inventory_status"] = df.apply(
+        lambda r: "🟢 Completo"
+        if abs(_safe_number(r.quantity) - _safe_number(r.allocated_quantity)) < 0.0001
+        else ("🟡 Pendiente" if _safe_number(r.allocated_quantity) < _safe_number(r.quantity) else "🔴 Error"),
+        axis=1,
+    )
     legacy = df["camelia_quantity"].eq(0) & df.destination.eq("Camelia · permanece en el local")
     df.loc[legacy, "camelia_quantity"] = df.loc[legacy, "quantity"]
     return df
@@ -238,8 +294,8 @@ def get_allocations(item_id, existing=None):
     with db() as conn:
         loc = pd.read_sql_query("SELECT area_name, quantity FROM item_locations WHERE inventory_id=? ORDER BY id", conn, params=(item_id,)) if item_id else pd.DataFrame()
         dest = pd.read_sql_query("SELECT destination_name, quantity FROM item_destinations WHERE inventory_id=? ORDER BY id", conn, params=(item_id,)) if item_id else pd.DataFrame()
-    locations = {str(r.area_name): float(r.quantity) for _, r in loc.iterrows()} if not loc.empty else {}
-    destinations = {str(r.destination_name): float(r.quantity) for _, r in dest.iterrows()} if not dest.empty else {}
+    locations = {str(r.area_name): _safe_number(r.quantity) for _, r in loc.iterrows()} if not loc.empty else {}
+    destinations = {str(r.destination_name): _safe_number(r.quantity) for _, r in dest.iterrows()} if not dest.empty else {}
     if existing and not locations and existing.get("current_area"):
         locations[str(existing.get("current_area"))] = float(existing.get("quantity", 0) or 0)
     if existing and not destinations and existing.get("destination"):
@@ -526,7 +582,7 @@ def inventory_article_detail(df, key_prefix="camel_detail_"):
     st.caption("Selecciona un artículo para ver su fotografía y la información completa.")
 
     choices = {
-        f"#{int(r.id)} · {r.item_name} · {r.quantity:g} {r.unit}": int(r.id)
+        f"#{int(r.id)} · {r.item_name} · {_format_quantity(r.quantity)} {r.unit}": int(r.id)
         for _, r in df.sort_values(["item_name", "id"]).iterrows()
     }
     selected_label = st.selectbox(
@@ -550,7 +606,7 @@ def inventory_article_detail(df, key_prefix="camel_detail_"):
         st.markdown(f"### {selected.item_name}")
         m1, m2, m3 = st.columns(3)
         with m1:
-            metric("Cantidad", f"{selected.quantity:g} {selected.unit}", "Inventario registrado")
+            metric("Cantidad", f"{_format_quantity(selected.quantity)} {selected.unit}", "Inventario registrado")
         with m2:
             metric("Precio unitario", f"${unit_price:,.2f}", "Valor estimado")
         with m3:
@@ -1640,7 +1696,7 @@ def guest_inventory(df):
 
     st.markdown("### Consultar artículo")
     choices = {
-        f"#{int(r.id)} · {r.item_name} · {r.quantity:g} {r.unit}": int(r.id)
+        f"#{int(r.id)} · {r.item_name} · {_format_quantity(r.quantity)} {r.unit}": int(r.id)
         for _, r in filtered.sort_values(["item_name", "id"]).iterrows()
     }
     selected_label = st.selectbox("Artículo inventariado", list(choices.keys()))
@@ -1657,7 +1713,7 @@ def guest_inventory(df):
         st.markdown(f"### {selected.item_name}")
         m1, m2, m3 = st.columns(3)
         with m1:
-            metric("Cantidad", f"{selected.quantity:g} {selected.unit}", "Permanece en Camelia")
+            metric("Cantidad", f"{_format_quantity(selected.quantity)} {selected.unit}", "Permanece en Camelia")
         with m2:
             metric("Categoría", str(selected.category), "Clasificación")
         with m3:
