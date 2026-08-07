@@ -520,6 +520,7 @@ def expiry(raw):
 
 def dashboard(df):
     st.markdown("<div class='hero'><small>Camelia Modern Mexican Cuisine</small><h1>Inventario de Cierre</h1><p>Una vista clara y ejecutiva para conocer qué existe, en qué condición se encuentra y cuál será el destino final de cada artículo.</p></div>",unsafe_allow_html=True)
+    st.caption("Camelia V12 · Supabase · build 2026-08-07.2")
     total=len(df); units=df.quantity.sum() if total else 0; pending=df.transfer_status.isin(["Pendiente","Separado","En traslado"]).sum() if total else 0; est=(df.quantity*df.estimated_unit_value).sum() if total else 0
     soon=expired=0
     if total:
@@ -538,11 +539,25 @@ def dashboard(df):
             count=(df.destination==dest).sum() if total else 0; q=df.loc[df.destination==dest,"quantity"].sum() if total else 0
             if img == "camelia_logo.png":
                 image_html = camelia_logo_html()
+            elif img == "coco_pirata.png":
+                image_html=f"<img src='data:image/png;base64,{COCO_PIRATA_LOGO_B64}' alt='{dest}'>"
             else:
                 p=ASSETS/img
-                b64=base64.b64encode(p.read_bytes()).decode()
-                mime="image/png" if p.suffix==".png" else "image/jpeg"
-                image_html=f"<img src='data:{mime};base64,{b64}' alt='{dest}'>"
+                if p.exists():
+                    b64=base64.b64encode(p.read_bytes()).decode()
+                    mime="image/png" if p.suffix.lower()==".png" else "image/jpeg"
+                    image_html=f"<img src='data:{mime};base64,{b64}' alt='{dest}'>"
+                else:
+                    # No detener toda la app si un logo opcional no está en GitHub.
+                    # Se muestra una tarjeta tipográfica hasta que se agregue el archivo del logo.
+                    short_name=dest.split(" · ")[0]
+                    image_html=(
+                        "<div style='height:78px;display:flex;align-items:center;justify-content:center;"
+                        "padding:8px 12px;border-radius:12px;background:#f6f1e7;color:#27231d;"
+                        "font-weight:900;text-align:center;line-height:1.05'>"
+                        f"{html.escape(short_name)}"
+                        "</div>"
+                    )
             st.markdown(f"<div class='dest'>{image_html}<div><b>{dest.split(' · ')[0]}</b></div><div style='font-size:1.35rem;font-weight:800'>{count}</div><small>{q:g} unidades</small></div>",unsafe_allow_html=True)
     if total:
         done=df.transfer_status.isin(["Entregado","Permanece en Camelia"]).sum(); st.markdown("<div class='section-title'>Seguimiento operativo</div><h3>Avance del cierre</h3>",unsafe_allow_html=True); st.progress(done/max(total,1),text=f"{done} de {total} registros concluidos")
