@@ -1,0 +1,6 @@
+streamlit
+pandas
+psycopg[binary]
+openpyxl
+pillow
+reportlab
