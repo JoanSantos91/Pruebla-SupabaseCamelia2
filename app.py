@@ -759,6 +759,128 @@ def expiry(raw):
         return f"Vence en {days} días", days
     return d.strftime("%d/%m/%Y"), days
 
+
+RESTAURANT_ROUTES = {
+    "camelia": ("Camelia", "Camelia · permanece en el local"),
+    "coco-pirata": ("El Coco Pirata", "Coco Pirata"),
+    "cabron-carbon": ("Cabrón Carbón", "Cabrón Carbón"),
+    "la-machaca": ("La Machaca de mi Ama", "La Machaca"),
+}
+
+
+def _restaurant_inventory(df, destination_name):
+    """Devuelve el inventario asignado a un restaurante con la cantidad real destinada."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=df.columns if df is not None else [])
+
+    if destination_name == "Camelia · permanece en el local":
+        out = df[df["camelia_quantity"].gt(0)].copy()
+        if not out.empty:
+            out["quantity"] = out["camelia_quantity"].astype(float)
+            out["destination"] = destination_name
+        return out
+
+    allocations = query_df(
+        "SELECT inventory_id, quantity FROM item_destinations WHERE destination_name=? AND quantity>0 ORDER BY id",
+        (destination_name,),
+    )
+    qty_by_id = {}
+    if not allocations.empty:
+        qty_by_id = {
+            int(r.inventory_id): _safe_number(r.quantity, 0.0)
+            for _, r in allocations.iterrows()
+            if _safe_number(r.quantity, 0.0) > 0
+        }
+
+    # Compatibilidad con artículos antiguos que guardaban un solo destino en inventory.
+    legacy = df[df["destination"].eq(destination_name)]
+    for _, row in legacy.iterrows():
+        item_id = int(row.id)
+        if item_id not in qty_by_id:
+            qty_by_id[item_id] = _safe_number(row.quantity, 0.0)
+
+    if not qty_by_id:
+        return df.iloc[0:0].copy()
+
+    out = df[df.id.isin(qty_by_id.keys())].copy()
+    out["quantity"] = out.id.map(qty_by_id).fillna(0.0).astype(float)
+    out["destination"] = destination_name
+    return out[out.quantity.gt(0)].copy()
+
+
+def restaurant_detail(df, slug):
+    info = RESTAURANT_ROUTES.get(str(slug))
+    if not info:
+        st.warning("Restaurante no encontrado.")
+        return
+
+    display_name, destination_name = info
+    restaurant_df = _restaurant_inventory(df, destination_name)
+
+    c_back, c_title = st.columns([1, 5])
+    with c_back:
+        if st.button("← Volver", use_container_width=True, key=f"back_{slug}"):
+            try:
+                del st.query_params["restaurant"]
+            except Exception:
+                st.query_params.clear()
+            st.rerun()
+    with c_title:
+        st.markdown(f"## {display_name}")
+        st.caption("Inventario asignado a este restaurante")
+
+    total_records = len(restaurant_df)
+    total_units = _safe_number(restaurant_df.quantity.sum(), 0.0) if total_records else 0.0
+    total_value = (
+        _safe_number((restaurant_df.quantity * restaurant_df.estimated_unit_value).sum(), 0.0)
+        if total_records and "estimated_unit_value" in restaurant_df.columns else 0.0
+    )
+    categories = int(restaurant_df.category.nunique()) if total_records else 0
+
+    cols = st.columns(4)
+    values = [
+        ("Artículos", total_records, "Registros asignados"),
+        ("Unidades", f"{total_units:,.0f}", "Cantidad asignada"),
+        ("Categorías", categories, "Familias de activos"),
+        ("Valor estimado", f"${total_value:,.0f}", "Según valores capturados"),
+    ]
+    for col, value in zip(cols, values):
+        with col:
+            metric(*value)
+
+    if restaurant_df.empty:
+        st.info(f"Aún no hay artículos asignados a {display_name}.")
+        return
+
+    st.markdown("### Inventario asignado")
+    view = restaurant_df.copy()
+    view["Valor total"] = view.quantity * view.estimated_unit_value
+    columns = ["item_name", "category", "subcategory", "quantity", "unit", "condition_status", "estimated_unit_value", "Valor total"]
+    st.dataframe(
+        view[columns].rename(columns={
+            "item_name": "Artículo",
+            "category": "Categoría",
+            "subcategory": "Subcategoría",
+            "quantity": "Cantidad",
+            "unit": "Unidad",
+            "condition_status": "Estado",
+            "estimated_unit_value": "Valor unitario",
+        }),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Valor unitario": st.column_config.NumberColumn(format="$%.2f"),
+            "Valor total": st.column_config.NumberColumn(format="$%.2f"),
+        },
+    )
+
+    st.markdown("### Resumen por categoría")
+    category_summary = restaurant_df.groupby("category", as_index=False).agg(
+        Artículos=("id", "count"),
+        Unidades=("quantity", "sum"),
+    ).rename(columns={"category": "Categoría"})
+    st.dataframe(category_summary, use_container_width=True, hide_index=True)
+
 def dashboard(df):
     st.caption(f"Camelia V12 · {CAMELIA_NATIVE_BUILD}")
     st.markdown("<div class='hero'><small>Camelia Modern Mexican Cuisine</small><h1>Inventario de Cierre</h1><p>Una vista clara y ejecutiva para conocer qué existe, en qué condición se encuentra y cuál será el destino final de cada artículo.</p></div>",unsafe_allow_html=True)
@@ -774,8 +896,14 @@ def dashboard(df):
     for c,v in zip(cols,vals):
         with c: metric(*v)
     st.markdown("<div class='section-title'>Mapa de distribución</div><h3>Destino de los artículos</h3>",unsafe_allow_html=True)
-    cards=[("Camelia · permanece en el local","camelia_logo.png"),("Coco Pirata","coco_pirata.png"),("Cabrón Carbón","cabron_carbon.jpeg"),("La Machaca","la_machaca.jpeg")]
-    for col,(dest,img) in zip(st.columns(4),cards):
+    cards=[
+        ("Camelia · permanece en el local","camelia_logo.png","camelia"),
+        ("Coco Pirata","coco_pirata.png","coco-pirata"),
+        ("Cabrón Carbón","cabron_carbon.jpeg","cabron-carbon"),
+        ("La Machaca","la_machaca.jpeg","la-machaca"),
+    ]
+    st.caption("Haz clic en el logo de un restaurante para abrir su inventario asignado.")
+    for col,(dest,img,slug) in zip(st.columns(4),cards):
         with col:
             count=(df.destination==dest).sum() if total else 0; q=df.loc[df.destination==dest,"quantity"].sum() if total else 0
             if img == "camelia_logo.png":
@@ -799,7 +927,16 @@ def dashboard(df):
                         f"{html.escape(short_name)}"
                         "</div>"
                     )
-            st.markdown(f"<div class='dest'>{image_html}<div><b>{dest.split(' · ')[0]}</b></div><div style='font-size:1.35rem;font-weight:800'>{count}</div><small>{q:g} unidades</small></div>",unsafe_allow_html=True)
+            clickable_logo = (
+                f"<a href='?restaurant={slug}' target='_self' title='Ver inventario de {html.escape(dest.split(' · ')[0])}' "
+                "style='display:block;text-decoration:none;cursor:pointer'>"
+                f"{image_html}</a>"
+            )
+            st.markdown(
+                f"<div class='dest'>{clickable_logo}<div><b>{dest.split(' · ')[0]}</b></div>"
+                f"<div style='font-size:1.35rem;font-weight:800'>{count}</div><small>{q:g} unidades</small></div>",
+                unsafe_allow_html=True,
+            )
     if total:
         done=df.transfer_status.isin(["Entregado","Permanece en Camelia"]).sum(); st.markdown("<div class='section-title'>Seguimiento operativo</div><h3>Avance del cierre</h3>",unsafe_allow_html=True); st.progress(done/max(total,1),text=f"{done} de {total} registros concluidos")
         c1,c2=st.columns(2)
@@ -2024,6 +2161,15 @@ def main():
             st.rerun()
 
     df = load_df()
+
+    # Navegación directa desde los logos del Resumen.
+    # Ejemplo: ?restaurant=coco-pirata
+    restaurant_slug = st.query_params.get("restaurant")
+    if isinstance(restaurant_slug, list):
+        restaurant_slug = restaurant_slug[0] if restaurant_slug else None
+    if restaurant_slug and role != "guest":
+        restaurant_detail(df, restaurant_slug)
+        return
 
     if role == "guest":
         guest_df = df[df["camelia_quantity"].gt(0)].copy()
